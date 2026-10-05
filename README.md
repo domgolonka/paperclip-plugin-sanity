@@ -6,7 +6,7 @@ A [Paperclip](https://github.com/paperclipai/paperclip) plugin that connects age
   - `query`: runs GROQ against your dataset.
   - `mutate`: changes documents in one transaction.
   - `publish`: publishes a draft.
-- **Webhook → issue**: when a Sanity document changes, a Paperclip issue is opened and can be assigned to an agent, which wakes that agent.
+- **Sanity changes → issues**: a document change opens a Paperclip issue, via a signed webhook or, if Sanity cannot reach Paperclip, by polling. The issue can be assigned to an agent, which wakes it.
 
 The plugin calls the Sanity HTTP API with plain fetch. It has no runtime dependencies.
 
@@ -54,6 +54,21 @@ How the plugin handles deliveries:
 - It checks the `sanity-webhook-signature` header. This is HMAC-SHA256 with a 5-minute window, the same algorithm as `@sanity/webhook`.
 - It ignores repeat deliveries that carry the same `idempotency-key`.
 - Sanity must be able to reach your Paperclip server. On a private `local_trusted` instance, use a tunnel such as `cloudflared` or `ngrok`.
+
+## No public URL? Poll instead of webhooks
+
+Sanity webhooks can't call `localhost` or a private Paperclip instance. In that case, set **Poll for changes (GROQ filter)** in the plugin settings, for example:
+
+```groq
+_type in ["post", "page"]
+```
+
+- **How it works**: every minute the `poll-changes` job asks Sanity for published documents matching the filter whose `_updatedAt` changed. It opens one issue per change, using the same title, project and assignee as webhooks.
+- **Nothing to expose**: all calls go out from your machine, so you need no tunnel and no webhook.
+- **First run**: it only records the current time. Existing content does not flood you with issues.
+- **Limits**: changes can take up to a minute to arrive. Deletions and draft-only edits are not detected; use webhooks for those.
+
+> Don't tunnel a whole `local_trusted` Paperclip to the internet to receive webhooks. That mode has no login, so anyone with the URL would get full board access.
 
 ## Development
 

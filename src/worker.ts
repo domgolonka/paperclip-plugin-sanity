@@ -7,14 +7,19 @@ interface SanityConfig {
   dataset?: string;
   apiVersion?: string;
   apiToken?: unknown;
+  pollFilter?: string;
   webhookSecret?: unknown;
   webhookProjectId?: string;
   webhookAssigneeAgentId?: string;
 }
 
+type SanityDoc = Record<string, unknown> & { _id?: string; _type?: string; _createdAt?: string; _updatedAt?: string };
+
 // ponytail: hard truncation keeps agent context small; add cursor paging if agents keep hitting it
 const MAX_TOOL_CHARS = 40_000;
 const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
+// ponytail: more than POLL_LIMIT docs sharing one _updatedAt would stall the cursor; page by _id if that ever happens
+export const POLL_LIMIT = 100;
 
 /** Reimplements @sanity/webhook: header `t=<ms>,v1=<base64url(HMAC-SHA256(secret, "<t>.<rawBody>"))>`. */
 export function verifySanitySignature(rawBody: string, header: string, secret: string, now = Date.now()): boolean {
@@ -39,6 +44,8 @@ function header(headers: Record<string, string | string[]>, name: string): strin
 }
 
 let ctx: PluginContext;
+/** Companies with saved config; the host replays configChanged for each one at worker start. */
+const configuredCompanies = new Set<string>();
 
 async function getConfig(companyId: string): Promise<SanityConfig> {
   return (await ctx.config.get(companyId)) as SanityConfig;
@@ -67,6 +74,71 @@ async function sanityFetch(companyId: string, path: string, init: RequestInit = 
   return body;
 }
 
+async function groq(companyId: string, query: string, params: unknown = {}, perspective = "published"): Promise<any> {
+  const qs = new URLSearchParams({ perspective, returnQuery: "false" });
+  const body = await sanityFetch(companyId, `/data/query/{dataset}?${qs}`, {
+    method: "POST",
+    body: JSON.stringify({ query, params }),
+  });
+  return body.result;
+}
+
+/** Opens one issue per change; `dedupeKey` makes webhook retries and overlapping polls no-ops. */
+async function openChangeIssue(
+  companyId: string,
+  cfg: SanityConfig,
+  change: { operation: string; documentId: string; dataset?: string; doc: SanityDoc; dedupeKey: string },
+) {
+  // ponytail: one state row per change, never pruned; add a cleanup job if volume gets large
+  const seen = { scopeKind: "company" as const, scopeId: companyId, namespace: "sanity-change", stateKey: change.dedupeKey };
+  if (await ctx.state.get(seen)) return;
+  const label = change.doc.title ?? change.doc.name ?? change.doc._type;
+  await ctx.issues.create({
+    companyId,
+    projectId: cfg.webhookProjectId || undefined,
+    assigneeAgentId: cfg.webhookAssigneeAgentId || undefined,
+    title: `Sanity ${change.operation}: ${label ? `${label} ` : ""}(${change.documentId})`.slice(0, 200),
+    description: [
+      `Sanity \`${change.operation}\` on document \`${change.documentId}\` in dataset \`${change.dataset ?? cfg.dataset ?? "production"}\`.`,
+      "",
+      "Document:",
+      "```json",
+      clip(change.doc),
+      "```",
+    ].join("\n"),
+    originId: `sanity:${change.dedupeKey}`.slice(0, 200),
+  });
+  await ctx.state.set(seen, new Date().toISOString());
+}
+
+async function pollCompany(companyId: string) {
+  const cfg = await getConfig(companyId);
+  const filter = cfg.pollFilter?.trim();
+  if (!filter) return;
+  const cursor = { scopeKind: "company" as const, scopeId: companyId, namespace: "sanity-poll", stateKey: "since" };
+  const since = (await ctx.state.get(cursor)) as string | null;
+  if (!since) {
+    // First run starts from now instead of opening an issue for every existing document.
+    await ctx.state.set(cursor, new Date().toISOString());
+    return;
+  }
+  // `>=` so documents sharing the boundary timestamp are not skipped; dedupe drops the repeats.
+  const docs = (await groq(
+    companyId,
+    `*[(${filter}) && _updatedAt >= $since] | order(_updatedAt asc) [0...${POLL_LIMIT}]`,
+    { since },
+  )) as SanityDoc[];
+  for (const doc of docs) {
+    await openChangeIssue(companyId, cfg, {
+      operation: doc._createdAt === doc._updatedAt ? "create" : "update",
+      documentId: String(doc._id),
+      doc,
+      dedupeKey: `poll:${doc._id}@${doc._updatedAt}`,
+    });
+  }
+  if (docs.length) await ctx.state.set(cursor, docs[docs.length - 1]._updatedAt);
+}
+
 function registerTool(name: string, run: (params: any, companyId: string) => Promise<unknown>) {
   const declaration = manifest.tools!.find((tool) => tool.name === name)!;
   ctx.tools.register(name, declaration, async (params, runCtx): Promise<ToolResult> => {
@@ -83,14 +155,9 @@ const plugin = definePlugin({
   async setup(context) {
     ctx = context;
 
-    registerTool("query", async ({ query, params, perspective }, companyId) => {
-      const qs = new URLSearchParams({ perspective: perspective ?? "published", returnQuery: "false" });
-      const body = await sanityFetch(companyId, `/data/query/{dataset}?${qs}`, {
-        method: "POST",
-        body: JSON.stringify({ query, params: params ?? {} }),
-      });
-      return body.result;
-    });
+    registerTool("query", async ({ query, params, perspective }, companyId) =>
+      groq(companyId, query, params ?? {}, perspective ?? "published"),
+    );
 
     registerTool("mutate", async ({ mutations, dryRun }, companyId) => {
       const qs = new URLSearchParams({ returnIds: "true", visibility: "sync", dryRun: String(Boolean(dryRun)) });
@@ -111,10 +178,24 @@ const plugin = definePlugin({
         }),
       });
     });
+
+    ctx.jobs.register("poll-changes", async () => {
+      const failures: string[] = [];
+      for (const companyId of configuredCompanies) {
+        try {
+          await pollCompany(companyId);
+        } catch (err) {
+          failures.push(`${companyId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (failures.length) throw new Error(`Sanity poll failed for ${failures.join("; ")}`);
+    });
   },
 
-  // Config is read per call, so there is nothing to reload; this stops the host restarting the worker on save.
-  async onConfigChanged() {},
+  // Config is read per call; this only tracks which companies to poll (and stops the host restarting the worker).
+  async onConfigChanged(_config, context) {
+    if (context?.companyId) configuredCompanies.add(context.companyId);
+  },
 
   async onWebhook(input) {
     // Plugin config is per company but the webhook route is per plugin, so the caller names the company.
@@ -127,32 +208,15 @@ const plugin = definePlugin({
       throw new Error("Invalid Sanity webhook signature");
     }
 
-    // Sanity retries deliveries with the same idempotency-key.
-    // ponytail: one state row per delivery, never pruned; add a cleanup job if volume gets large
-    const deliveryKey = header(input.headers, "idempotency-key") ?? input.requestId;
-    const seen = { scopeKind: "company" as const, scopeId: companyId, namespace: "sanity-webhook", stateKey: deliveryKey };
-    if (await ctx.state.get(seen)) return;
-
-    const doc = (input.parsedBody ?? {}) as Record<string, unknown>;
-    const operation = header(input.headers, "sanity-operation") ?? "change";
-    const documentId = header(input.headers, "sanity-document-id") ?? String(doc._id ?? "unknown");
-    const label = doc.title ?? doc.name ?? doc._type;
-    await ctx.issues.create({
-      companyId,
-      projectId: cfg.webhookProjectId || undefined,
-      assigneeAgentId: cfg.webhookAssigneeAgentId || undefined,
-      title: `Sanity ${operation}: ${label ? `${label} ` : ""}(${documentId})`.slice(0, 200),
-      description: [
-        `Sanity \`${operation}\` on document \`${documentId}\` in dataset \`${header(input.headers, "sanity-dataset") ?? cfg.dataset ?? "production"}\`.`,
-        "",
-        "Webhook payload:",
-        "```json",
-        clip(doc),
-        "```",
-      ].join("\n"),
-      originId: `sanity:${deliveryKey}`,
+    const doc = (input.parsedBody ?? {}) as SanityDoc;
+    await openChangeIssue(companyId, cfg, {
+      operation: header(input.headers, "sanity-operation") ?? "change",
+      documentId: header(input.headers, "sanity-document-id") ?? String(doc._id ?? "unknown"),
+      dataset: header(input.headers, "sanity-dataset"),
+      doc,
+      // Sanity retries deliveries with the same idempotency-key.
+      dedupeKey: `webhook:${header(input.headers, "idempotency-key") ?? input.requestId}`,
     });
-    await ctx.state.set(seen, new Date().toISOString());
   },
 });
 

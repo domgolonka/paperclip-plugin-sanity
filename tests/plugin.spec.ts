@@ -100,6 +100,38 @@ describe("webhook", () => {
     expect(create.mock.calls[0][0]).toMatchObject({ companyId: COMPANY, title: "Sanity update: Hello (post-1)" });
   });
 
+  it("polling starts from now, opens one issue per change and advances the cursor", async () => {
+    const harness = await setup();
+    harness.setConfig({ projectId: "abc123", apiToken: tokenRef, pollFilter: '_type == "post"' });
+    await plugin.definition.onConfigChanged!({}, { companyId: COMPANY });
+    const create = vi.spyOn(harness.ctx.issues, "create");
+    const docs = [
+      { _id: "post-1", _type: "post", title: "New", _createdAt: "2026-10-05T10:00:00Z", _updatedAt: "2026-10-05T10:00:00Z" },
+      { _id: "post-2", _type: "post", title: "Edited", _createdAt: "2026-01-01T00:00:00Z", _updatedAt: "2026-10-05T10:01:00Z" },
+    ];
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ result: docs }));
+    vi.stubGlobal("fetch", fetchMock);
+    const cursor = { scopeKind: "company" as const, scopeId: COMPANY, namespace: "sanity-poll", stateKey: "since" };
+
+    await harness.runJob("poll-changes"); // first run only records the starting point
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(harness.getState(cursor)).toBeTypeOf("string");
+
+    await harness.runJob("poll-changes");
+    await harness.runJob("poll-changes"); // same docs again (>= boundary) are deduped
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls.map((call) => call[0].title)).toEqual([
+      "Sanity create: New (post-1)",
+      "Sanity update: Edited (post-2)",
+    ]);
+    expect(harness.getState(cursor)).toBe("2026-10-05T10:01:00Z");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(String(fetchMock.mock.calls[1][1]!.body));
+    expect(sent.params).toEqual({ since: "2026-10-05T10:01:00Z" });
+    expect(sent.query).toContain('(_type == "post") && _updatedAt >= $since');
+  });
+
   it("rejects a bad signature", async () => {
     await setup();
     await expect(

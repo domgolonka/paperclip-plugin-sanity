@@ -14,6 +14,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
     "webhooks.receive",
+    "jobs.schedule",
     "issues.create",
     "plugin.state.read",
     "plugin.state.write",
@@ -38,6 +39,12 @@ const manifest: PaperclipPluginManifestV1 = {
         description:
           "Sanity robot token. Its role sets what agents can do: Viewer is read-only, Editor can write and publish.",
       },
+      pollFilter: {
+        type: "string",
+        title: "Poll for changes (GROQ filter)",
+        description:
+          "Alternative to webhooks when Sanity cannot reach Paperclip (e.g. localhost). Every minute, published documents matching this filter that changed are turned into issues. Example: _type in [\"post\", \"page\"]. Leave empty to disable. Deletions are not detected.",
+      },
       webhookSecret: {
         format: "secret-ref",
         title: "Webhook secret",
@@ -45,16 +52,24 @@ const manifest: PaperclipPluginManifestV1 = {
       },
       webhookProjectId: {
         type: "string",
-        title: "Paperclip project for webhook issues",
-        description: "Optional. Issues created from Sanity webhooks go to this Paperclip project.",
+        title: "Paperclip project for change issues",
+        description: "Optional. Issues created from Sanity webhooks or polling go to this Paperclip project.",
       },
       webhookAssigneeAgentId: {
         type: "string",
-        title: "Agent to assign webhook issues to",
-        description: "Optional. Paperclip agent ID that is assigned (and woken) for each webhook issue.",
+        title: "Agent to assign change issues to",
+        description: "Optional. Paperclip agent ID that is assigned (and woken) for each change issue.",
       },
     },
   },
+  jobs: [
+    {
+      jobKey: "poll-changes",
+      displayName: "Poll Sanity for changes",
+      description: "Opens issues for documents matching each company's pollFilter that changed since the last run.",
+      schedule: "* * * * *",
+    },
+  ],
   webhooks: [
     {
       endpointKey: "document-changed",
