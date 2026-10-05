@@ -7,7 +7,8 @@
     "build": "node ./esbuild.config.mjs",
     "dev": "node ./esbuild.config.mjs --watch",
     "test": "vitest run --config ./vitest.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "paperclipPlugin": {
     "manifest": "./dist/manifest.js",
@@ -28,7 +29,7 @@
     "vitest": "^3.0.5"
   },
   "files": [
-    "dist"
+    "dist/*.js"
   ],
   "engines": {
     "node": ">=24.11.0"
@@ -36,5 +37,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/domgolonka/paperclip-plugin-sanity.git"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/domgolonka/paperclip-plugin-sanity#readme"
 }
