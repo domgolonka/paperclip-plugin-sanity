@@ -1,0 +1,40 @@
+{
+  "name": "@domgolonka/paperclip-plugin-sanity",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Sanity CMS connector for Paperclip agents",
+  "scripts": {
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "connector"
+  ],
+  "author": "Dominik Golonka",
+  "license": "MIT",
+  "devDependencies": {
+    "@paperclipai/plugin-sdk": "2026.1001.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/domgolonka/paperclip-plugin-sanity.git"
+  }
+}
