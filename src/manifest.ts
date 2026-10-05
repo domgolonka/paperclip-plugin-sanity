@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "domgolonka.paperclip-plugin-sanity",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.2.0",
   displayName: "Sanity",
   description:
     "Sanity CMS connector: agents query content with GROQ, write drafts, and publish. Sanity webhooks open Paperclip issues.",
